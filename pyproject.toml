@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nowa-photos"
+version = "0.1.0"
+description = "Family photo and video archival ingestion platform"
+requires-python = ">=3.10"
+dependencies = [
+    "Pillow>=10.0",
+    "pillow-heif>=0.13",
+    "exifread>=3.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+nowa-photos-ingest = "nowa_photos.ingest:main"
+
+[tool.setuptools.packages.find]
+include = ["nowa_photos*"]

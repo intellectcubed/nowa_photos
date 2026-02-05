@@ -1,0 +1,27 @@
+# Nowa Photos — Configuration
+# Copy this file and adjust paths before running.
+
+# Paths
+ingestion_path: "/path/to/source/folder"
+archive_path: "/path/to/archive"
+db_path: "data/nowa_photos.db"          # relative to archive_path
+metadata_path: "data/metadata.jsonl"    # relative to archive_path
+
+# Behavior
+mode: "copy"                # "copy" or "move"
+enable_tag_prompts: true    # batch folder-level tag prompts
+
+# Tag filtering
+tag_stop_words:
+  - "backup"
+  - "photos"
+  - "images"
+  - "media"
+  - "camera"
+  - "dcim"
+  - "export"
+  - "downloads"
+  - "documents"
+
+# Logging
+log_dir: "logs"             # relative to archive_path

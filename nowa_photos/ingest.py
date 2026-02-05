@@ -10,11 +10,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from nowa_photos.config import build_config, AppConfig
+from nowa_photos.config import AppConfig
 from nowa_photos.database import Database
 from nowa_photos.hasher import hash_file
 from nowa_photos.metadata import export_metadata_jsonl
-from nowa_photos.tagger import batch_prompt_folders, extract_tags_from_path
+from nowa_photos.tagger import extract_folder_tags, load_tag_review_csv, write_tag_review_csv
 
 # --- Supported extensions ---
 
@@ -334,17 +334,16 @@ def run_ingestion(config: AppConfig) -> SessionStats:
                 stats.error_details.append(f"{file_path}: {exc}")
                 print(f"  ERROR processing {file_path}: {exc}")
 
-        # 3. Tag application
+        # 3. Tag application (auto-apply defaults, write review CSV)
         files_by_folder: dict[str, list[Path]] = defaultdict(list)
         for file_path in files:
             rel_folder = str(Path(file_path).relative_to(config.ingestion_path).parent)
             files_by_folder[rel_folder].append(file_path)
 
-        folder_tags = batch_prompt_folders(
+        folder_tags = extract_folder_tags(
             files_by_folder,
             config.ingestion_path,
             stop_words=config.tag_stop_words,
-            enable_prompts=config.enable_tag_prompts,
         )
 
         for folder, tags in folder_tags.items():
@@ -355,6 +354,14 @@ def run_ingestion(config: AppConfig) -> SessionStats:
                 if media_id is not None:
                     db.add_tags(media_id, tags)
                     stats.tags_added += len(tags)
+
+        # Write tag review CSV for user to edit
+        file_counts = {folder: len(paths) for folder, paths in files_by_folder.items()}
+        ts_str = session_ts.replace(":", "").replace("-", "").replace("T", "_")
+        csv_path = config.metadata_path.parent / f"tag_review_{ts_str}.csv"
+        write_tag_review_csv(folder_tags, file_counts, csv_path)
+        print(f"Tag review CSV: {csv_path}")
+        print("  Edit this file and run with --apply-tags to override tag assignments.")
 
         # 4. Export metadata JSONL
         count = export_metadata_jsonl(db, config.metadata_path)
@@ -377,13 +384,72 @@ def run_ingestion(config: AppConfig) -> SessionStats:
     return stats
 
 
+def apply_tags_from_csv(config: AppConfig, csv_path: Path) -> None:
+    """Apply tag overrides from an edited review CSV.
+
+    For each folder in the CSV, finds all media records sourced from that
+    folder and replaces their tags with the values from the CSV.
+    Then re-exports the JSONL metadata file.
+    """
+    folder_tags = load_tag_review_csv(csv_path)
+    ingestion_str = str(config.ingestion_path)
+
+    db = Database(config.db_path)
+    try:
+        replaced = 0
+        for folder, tags in folder_tags.items():
+            media_ids = db.get_media_ids_by_source_folder(ingestion_str, folder)
+            for mid in media_ids:
+                db.replace_tags(mid, tags)
+                replaced += 1
+
+        count = export_metadata_jsonl(db, config.metadata_path)
+        print(f"Updated tags for {replaced} media records from {len(folder_tags)} folders.")
+        print(f"Exported {count} records to {config.metadata_path}")
+    finally:
+        db.close()
+
+
 def main():
     """CLI entry point."""
-    config = build_config()
+    import argparse
 
-    if not config.ingestion_path.exists():
-        print(f"Error: ingestion path does not exist: {config.ingestion_path}", file=sys.stderr)
+    parser = argparse.ArgumentParser(
+        prog="nowa-photos-ingest",
+        description="Nowa Photos archival ingestion system",
+    )
+    parser.add_argument(
+        "--config", "-c",
+        type=Path,
+        required=True,
+        help="Path to YAML configuration file",
+    )
+    parser.add_argument(
+        "--apply-tags",
+        type=Path,
+        default=None,
+        help="Path to an edited tag review CSV to apply",
+    )
+    args = parser.parse_args()
+
+    # Load config using the same YAML loader, but bypass its own CLI parsing
+    from nowa_photos.config import _load_yaml, _validate_and_resolve
+    config_path = args.config.expanduser().resolve()
+    if not config_path.exists():
+        print(f"Error: config file not found: {config_path}", file=sys.stderr)
         sys.exit(1)
+    data = _load_yaml(config_path)
+    config = _validate_and_resolve(data)
 
-    config.archive_path.mkdir(parents=True, exist_ok=True)
-    run_ingestion(config)
+    if args.apply_tags:
+        csv_path = args.apply_tags.expanduser().resolve()
+        if not csv_path.exists():
+            print(f"Error: CSV file not found: {csv_path}", file=sys.stderr)
+            sys.exit(1)
+        apply_tags_from_csv(config, csv_path)
+    else:
+        if not config.ingestion_path.exists():
+            print(f"Error: ingestion path does not exist: {config.ingestion_path}", file=sys.stderr)
+            sys.exit(1)
+        config.archive_path.mkdir(parents=True, exist_ok=True)
+        run_ingestion(config)

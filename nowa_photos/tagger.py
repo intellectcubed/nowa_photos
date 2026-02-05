@@ -1,5 +1,6 @@
-"""Tag extraction from folder paths and interactive prompting."""
+"""Tag extraction from folder paths and CSV review workflow."""
 
+import csv
 import re
 from pathlib import Path
 
@@ -38,59 +39,66 @@ def _clean_tag(raw: str) -> str:
     return tag
 
 
-def prompt_tags_for_folder(
-    folder: str,
-    file_count: int,
-    suggested_tags: list[str],
-) -> list[str] | None:
-    """Interactively prompt the user to accept/edit tags for a folder.
-
-    Returns the final tag list, or None if the user declines tagging.
-    """
-    print(f'\nFolder "{folder}" contains {file_count} files.')
-    print(f"Suggested tags: {suggested_tags}")
-    print("Apply these tags to all files from this folder?")
-
-    while True:
-        response = input("(y = yes, n = no, edit = modify tags): ").strip().lower()
-        if response == "y":
-            return suggested_tags
-        elif response == "n":
-            return None
-        elif response == "edit":
-            raw = input("Enter comma-separated tags: ").strip()
-            if raw:
-                return [_clean_tag(t) for t in raw.split(",") if _clean_tag(t)]
-            return None
-        else:
-            print("Please enter y, n, or edit.")
-
-
-def batch_prompt_folders(
+def extract_folder_tags(
     files_by_folder: dict[str, list[Path]],
     base_path: Path,
     stop_words: list[str] | None = None,
-    enable_prompts: bool = True,
 ) -> dict[str, list[str]]:
-    """Group files by folder, extract tags, optionally prompt, return folder→tags mapping.
+    """Extract tags for each folder using directory names.
 
-    Returns a dict mapping folder (relative string) to the list of tags
-    that should be applied to all files in that folder.
+    Returns a dict mapping folder (relative string) to the list of
+    auto-extracted tags.
     """
     result: dict[str, list[str]] = {}
 
     for folder, files in sorted(files_by_folder.items()):
-        # Use the first file to derive tags for the folder
         suggested = extract_tags_from_path(files[0], base_path, stop_words)
+        result[folder] = suggested
 
-        if not suggested:
-            result[folder] = []
-            continue
+    return result
 
-        if enable_prompts:
-            tags = prompt_tags_for_folder(folder, len(files), suggested)
-            result[folder] = tags if tags is not None else []
-        else:
-            result[folder] = suggested
+
+def write_tag_review_csv(
+    folder_tags: dict[str, list[str]],
+    file_counts: dict[str, int],
+    csv_path: Path | str,
+) -> Path:
+    """Write a tag review CSV for the user to edit.
+
+    Columns: folder, file_count, tags (comma-separated within the field).
+    Returns the path written to.
+    """
+    csv_path = Path(csv_path)
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["folder", "file_count", "tags"])
+        for folder in sorted(folder_tags):
+            tags = folder_tags[folder]
+            count = file_counts.get(folder, 0)
+            writer.writerow([folder, count, ",".join(tags)])
+
+    return csv_path
+
+
+def load_tag_review_csv(csv_path: Path | str) -> dict[str, list[str]]:
+    """Load an edited tag review CSV and return folder -> tags mapping.
+
+    Parses the tags column as comma-separated values. Empty tags fields
+    result in an empty list for that folder.
+    """
+    result: dict[str, list[str]] = {}
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            folder = row["folder"]
+            raw_tags = row["tags"].strip()
+            if raw_tags:
+                tags = [_clean_tag(t) for t in raw_tags.split(",") if _clean_tag(t)]
+            else:
+                tags = []
+            result[folder] = tags
 
     return result

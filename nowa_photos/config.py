@@ -21,7 +21,6 @@ class AppConfig:
     db_path: Path
     metadata_path: Path
     mode: str = "copy"
-    enable_tag_prompts: bool = True
     tag_stop_words: list[str] = field(default_factory=lambda: list(DEFAULT_TAG_STOP_WORDS))
     log_dir: Path = Path("logs")
 
@@ -77,7 +76,6 @@ def _validate_and_resolve(data: dict) -> AppConfig:
     if mode not in ("copy", "move"):
         raise ValueError(f"mode must be 'copy' or 'move', got '{mode}'")
 
-    enable_tag_prompts = data.get("enable_tag_prompts", True)
     tag_stop_words = data.get("tag_stop_words", list(DEFAULT_TAG_STOP_WORDS))
 
     return AppConfig(
@@ -86,7 +84,6 @@ def _validate_and_resolve(data: dict) -> AppConfig:
         db_path=db_path,
         metadata_path=metadata_path,
         mode=mode,
-        enable_tag_prompts=enable_tag_prompts,
         tag_stop_words=tag_stop_words,
         log_dir=log_dir,
     )

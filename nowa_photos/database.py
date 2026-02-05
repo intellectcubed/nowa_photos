@@ -112,6 +112,43 @@ class Database:
                 [(media_id, tag) for tag in tags],
             )
 
+    def replace_tags(self, media_id: int, tags: list[str]) -> None:
+        """Replace all tags for a media record (delete + insert)."""
+        with self.transaction():
+            self.conn.execute(
+                "DELETE FROM tags WHERE media_id = ?",
+                (media_id,),
+            )
+            if tags:
+                self.conn.executemany(
+                    "INSERT INTO tags (media_id, tag_value) VALUES (?, ?)",
+                    [(media_id, tag) for tag in tags],
+                )
+
+    def get_media_ids_by_source_folder(
+        self, ingestion_path: str, folder: str,
+    ) -> list[int]:
+        """Return distinct media_ids whose source_path is within the given folder.
+
+        Matches source paths that start with '{ingestion_path}/{folder}/'.
+        For root-level files (folder is '.'), matches paths directly under ingestion_path.
+        """
+        if folder == ".":
+            prefix = ingestion_path.rstrip("/") + "/"
+            # Match files directly in ingestion_path (no further '/' after prefix)
+            rows = self.conn.execute(
+                """SELECT DISTINCT media_id FROM source
+                   WHERE source_path LIKE ? AND source_path NOT LIKE ?""",
+                (prefix + "%", prefix + "%/%"),
+            ).fetchall()
+        else:
+            prefix = ingestion_path.rstrip("/") + "/" + folder + "/"
+            rows = self.conn.execute(
+                "SELECT DISTINCT media_id FROM source WHERE source_path LIKE ?",
+                (prefix + "%",),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def get_all_media_with_details(self) -> list[dict]:
         """Return all media records with their sources and tags (denormalized)."""
         cursor = self.conn.execute(

@@ -13,6 +13,7 @@ from nowa_photos.ingest import (
     _classify_media,
     process_file,
     run_ingestion,
+    apply_tags_from_csv,
     SessionStats,
     PHOTO_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -149,7 +150,7 @@ def ingestion_env(tmp_path):
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
         mode="copy",
-        enable_tag_prompts=False,
+
         tag_stop_words=[],
         log_dir=archive / "logs",
     )
@@ -210,7 +211,7 @@ def test_move_mode(tmp_path):
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
         mode="move",
-        enable_tag_prompts=False,
+
         tag_stop_words=[],
         log_dir=archive / "logs",
     )
@@ -258,7 +259,7 @@ def test_tags_applied_from_folders(tmp_path):
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
         mode="copy",
-        enable_tag_prompts=False,
+
         tag_stop_words=[],
         log_dir=archive / "logs",
     )
@@ -270,4 +271,95 @@ def test_tags_applied_from_folders(tmp_path):
     records = db.get_all_media_with_details()
     assert "vacation" in records[0]["tags"]
     assert "italy" in records[0]["tags"]
+    db.close()
+
+
+def test_tag_review_csv_written(ingestion_env):
+    """Ingestion writes a tag review CSV in the data directory."""
+    config = ingestion_env
+    run_ingestion(config)
+
+    csv_files = list(config.metadata_path.parent.glob("tag_review_*.csv"))
+    assert len(csv_files) == 1
+
+
+def test_apply_tags_from_csv_overrides(tmp_path):
+    """apply_tags_from_csv replaces default tags with CSV values."""
+    source = tmp_path / "source"
+    archive = tmp_path / "archive"
+    (source / "vacation" / "italy").mkdir(parents=True)
+    archive.mkdir()
+    (source / "vacation" / "italy" / "photo.jpg").write_bytes(b"italy pic")
+
+    config = AppConfig(
+        ingestion_path=source,
+        archive_path=archive,
+        db_path=archive / "data" / "test.db",
+        metadata_path=archive / "data" / "metadata.jsonl",
+        mode="copy",
+
+        tag_stop_words=[],
+        log_dir=archive / "logs",
+    )
+
+    # Run ingestion (auto-applies default tags: vacation, italy)
+    run_ingestion(config)
+
+    db = Database(config.db_path)
+    records = db.get_all_media_with_details()
+    assert "vacation" in records[0]["tags"]
+    assert "italy" in records[0]["tags"]
+    db.close()
+
+    # Write an edited CSV that changes the tags
+    csv_path = tmp_path / "edited_tags.csv"
+    csv_path.write_text(
+        "folder,file_count,tags\n"
+        "vacation/italy,1,\"summer,rome\"\n"
+    )
+
+    # Apply overrides
+    apply_tags_from_csv(config, csv_path)
+
+    # Verify tags were replaced
+    db = Database(config.db_path)
+    records = db.get_all_media_with_details()
+    assert set(records[0]["tags"]) == {"summer", "rome"}
+    assert "vacation" not in records[0]["tags"]
+    db.close()
+
+
+def test_apply_tags_clears_tags(tmp_path):
+    """apply_tags_from_csv with empty tags clears existing tags."""
+    source = tmp_path / "source"
+    archive = tmp_path / "archive"
+    (source / "event").mkdir(parents=True)
+    archive.mkdir()
+    (source / "event" / "photo.jpg").write_bytes(b"event pic")
+
+    config = AppConfig(
+        ingestion_path=source,
+        archive_path=archive,
+        db_path=archive / "data" / "test.db",
+        metadata_path=archive / "data" / "metadata.jsonl",
+        mode="copy",
+
+        tag_stop_words=[],
+        log_dir=archive / "logs",
+    )
+
+    run_ingestion(config)
+
+    # Clear tags via CSV
+    csv_path = tmp_path / "clear_tags.csv"
+    csv_path.write_text(
+        "folder,file_count,tags\n"
+        "event,1,\"\"\n"
+    )
+
+    apply_tags_from_csv(config, csv_path)
+
+    db = Database(config.db_path)
+    records = db.get_all_media_with_details()
+    assert records[0]["tags"] == []
     db.close()

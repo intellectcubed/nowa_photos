@@ -9,7 +9,6 @@ metadata_path: "data/metadata.jsonl"    # relative to archive_path
 
 # Behavior
 mode: "copy"                # "copy" or "move"
-enable_tag_prompts: true    # batch folder-level tag prompts
 
 # Tag filtering
 tag_stop_words:

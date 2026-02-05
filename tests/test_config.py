@@ -26,7 +26,6 @@ def test_valid_config(valid_config_file, tmp_path):
     assert cfg.ingestion_path == (tmp_path / "source").resolve()
     assert cfg.archive_path == (tmp_path / "archive").resolve()
     assert cfg.mode == "copy"
-    assert cfg.enable_tag_prompts is True
 
 
 def test_missing_ingestion_path():
@@ -83,7 +82,6 @@ def test_defaults_applied():
         "archive_path": "/tmp/archive",
     })
     assert cfg.mode == "copy"
-    assert cfg.enable_tag_prompts is True
     assert len(cfg.tag_stop_words) > 0
     assert cfg.db_path == Path("/tmp/archive").resolve() / "data" / "nowa_photos.db"
 

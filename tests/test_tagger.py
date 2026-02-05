@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
-from nowa_photos.tagger import extract_tags_from_path, _clean_tag, batch_prompt_folders
+from nowa_photos.tagger import (
+    extract_tags_from_path,
+    _clean_tag,
+    extract_folder_tags,
+    write_tag_review_csv,
+    load_tag_review_csv,
+)
 
 
 def test_basic_tag_extraction():
@@ -72,8 +78,8 @@ def test_stop_words_case_insensitive():
     assert tags == ["birthday"]
 
 
-def test_batch_prompt_no_prompts():
-    """batch_prompt_folders with prompts disabled uses auto-extracted tags."""
+def test_extract_folder_tags():
+    """extract_folder_tags returns auto-extracted tags per folder."""
     base = Path("/source")
     files_by_folder = {
         "vacation": [Path("/source/vacation/IMG_001.jpg")],
@@ -82,20 +88,71 @@ def test_batch_prompt_no_prompts():
             Path("/source/birthday/anika/IMG_002.jpg"),
         ],
     }
-    result = batch_prompt_folders(
-        files_by_folder, base, stop_words=[], enable_prompts=False,
-    )
+    result = extract_folder_tags(files_by_folder, base, stop_words=[])
     assert result["vacation"] == ["vacation"]
     assert result["birthday/anika"] == ["birthday", "anika"]
 
 
-def test_batch_prompt_empty_folder_tags():
+def test_extract_folder_tags_empty():
     """Folders at root level produce no tags."""
     base = Path("/source")
     files_by_folder = {
         ".": [Path("/source/IMG_001.jpg")],
     }
-    result = batch_prompt_folders(
-        files_by_folder, base, stop_words=[], enable_prompts=False,
-    )
+    result = extract_folder_tags(files_by_folder, base, stop_words=[])
     assert result["."] == []
+
+
+# --- CSV round-trip tests ---
+
+def test_write_and_load_csv(tmp_path):
+    """CSV round-trip preserves folder-tag mappings."""
+    folder_tags = {
+        "vacation/italy": ["vacation", "italy"],
+        "birthday": ["birthday"],
+        "root_files": [],
+    }
+    file_counts = {
+        "vacation/italy": 12,
+        "birthday": 5,
+        "root_files": 3,
+    }
+    csv_path = tmp_path / "review.csv"
+
+    write_tag_review_csv(folder_tags, file_counts, csv_path)
+    loaded = load_tag_review_csv(csv_path)
+
+    assert loaded["vacation/italy"] == ["vacation", "italy"]
+    assert loaded["birthday"] == ["birthday"]
+    assert loaded["root_files"] == []
+
+
+def test_csv_with_edited_tags(tmp_path):
+    """Loading a CSV with user-edited tags works correctly."""
+    csv_path = tmp_path / "edited.csv"
+    csv_path.write_text(
+        "folder,file_count,tags\n"
+        "vacation/italy,12,\"vacation,italy,summer\"\n"
+        "birthday,5,\"\"\n"
+    )
+    loaded = load_tag_review_csv(csv_path)
+    assert loaded["vacation/italy"] == ["vacation", "italy", "summer"]
+    assert loaded["birthday"] == []
+
+
+def test_csv_cleans_tags(tmp_path):
+    """Tags loaded from CSV are cleaned/normalized."""
+    csv_path = tmp_path / "dirty.csv"
+    csv_path.write_text(
+        "folder,file_count,tags\n"
+        "photos,10,\"My Tag, UPPER, bday-party\"\n"
+    )
+    loaded = load_tag_review_csv(csv_path)
+    assert loaded["photos"] == ["mytag", "upper", "bday-party"]
+
+
+def test_csv_creates_parent_dirs(tmp_path):
+    """write_tag_review_csv creates parent directories."""
+    csv_path = tmp_path / "nested" / "dir" / "review.csv"
+    write_tag_review_csv({"a": ["tag"]}, {"a": 1}, csv_path)
+    assert csv_path.exists()

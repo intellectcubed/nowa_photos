@@ -211,20 +211,30 @@ def process_file(
     db: Database,
     session_ts: str,
     stats: SessionStats,
-) -> int | None:
+    is_duplicate: bool = False,
+) -> tuple[int | None, bool]:
     """Process a single file: hash, dedup, archive, record in DB.
 
-    Returns the media_id (new or existing) or None on error.
+    Returns (media_id, was_duplicate) tuple. media_id is None on error.
     """
     file_hash = hash_file(file_path)
 
+    # Split source path and filename
+    source_dir = str(file_path.parent)
+    source_filename = file_path.name
+
     existing = db.get_media_by_hash(file_hash)
     if existing:
-        # Duplicate: just add source path
+        # Duplicate: add source path (tags will be added in the tagging phase)
         stats.duplicates += 1
-        source_str = str(file_path)
-        db.add_source(existing["id"], source_str)
-        return existing["id"]
+        db.add_source(existing["id"], source_dir, source_filename)
+
+        # Auto-tag thumbnails based on path or filename
+        if "thumb" in source_dir.lower() or "thumb" in source_filename.lower():
+            db.add_tags(existing["id"], ["thumbnail"])
+            stats.tags_added += 1
+
+        return existing["id"], True
 
     # New file
     media_type = _classify_media(file_path)
@@ -250,13 +260,15 @@ def process_file(
     else:
         shutil.copy2(str(file_path), str(archive_dest))
 
-    # Compute archive_path relative to archive_root
-    rel_archive = str(archive_dest.relative_to(config.archive_path))
+    # Split archive path and filename
+    rel_archive_dir = str(archive_dest.parent.relative_to(config.archive_path))
+    archive_filename = archive_dest.name
 
     file_size = archive_dest.stat().st_size
 
     media_id = db.insert_media(
-        archive_path=rel_archive,
+        archive_path=rel_archive_dir,
+        archive_filename=archive_filename,
         media_type=media_type,
         hash_signature=file_hash,
         file_size=file_size,
@@ -267,9 +279,15 @@ def process_file(
     )
 
     # Record original source
-    db.add_source(media_id, str(file_path))
+    db.add_source(media_id, source_dir, source_filename)
+
+    # Auto-tag thumbnails based on path or filename
+    if "thumb" in source_dir.lower() or "thumb" in source_filename.lower():
+        db.add_tags(media_id, ["thumbnail"])
+        stats.tags_added += 1
+
     stats.imported += 1
-    return media_id
+    return media_id, False
 
 
 # --- Session log ---
@@ -311,7 +329,16 @@ def run_ingestion(config: AppConfig) -> SessionStats:
     session_ts = datetime.now().isoformat(timespec="seconds")
     stats = SessionStats()
 
-    db = Database(config.db_path)
+    # Work with a local copy of the database during ingestion
+    local_data_dir = Path("data")
+    local_data_dir.mkdir(parents=True, exist_ok=True)
+    local_db_path = local_data_dir / "nowa_photos.db"
+
+    # If archive DB exists and local doesn't, copy it for continuity
+    if config.db_path.exists() and not local_db_path.exists():
+        shutil.copy2(str(config.db_path), str(local_db_path))
+
+    db = Database(local_db_path)
     try:
         # 1. Discover files
         print(f"Scanning {config.ingestion_path} ...")
@@ -324,11 +351,14 @@ def run_ingestion(config: AppConfig) -> SessionStats:
 
         # 2. Process each file (with error isolation)
         file_media_ids: dict[Path, int] = {}
+        duplicate_files: set[Path] = set()
         for file_path in files:
             try:
-                media_id = process_file(file_path, config, db, session_ts, stats)
+                media_id, was_duplicate = process_file(file_path, config, db, session_ts, stats)
                 if media_id is not None:
                     file_media_ids[file_path] = media_id
+                    if was_duplicate:
+                        duplicate_files.add(file_path)
             except Exception as exc:
                 stats.errors += 1
                 stats.error_details.append(f"{file_path}: {exc}")
@@ -352,8 +382,13 @@ def run_ingestion(config: AppConfig) -> SessionStats:
             for file_path in files_by_folder[folder]:
                 media_id = file_media_ids.get(file_path)
                 if media_id is not None:
-                    db.add_tags(media_id, tags)
-                    stats.tags_added += len(tags)
+                    # add_tags handles duplicates gracefully (uses INSERT OR IGNORE)
+                    # so this works for both new files and duplicates
+                    existing_tags = db.get_tags_for_media(media_id)
+                    new_tags = [t for t in tags if t not in existing_tags]
+                    if new_tags:
+                        db.add_tags(media_id, new_tags)
+                        stats.tags_added += len(new_tags)
 
         # Write tag review CSV for user to edit
         file_counts = {folder: len(paths) for folder, paths in files_by_folder.items()}
@@ -381,6 +416,13 @@ def run_ingestion(config: AppConfig) -> SessionStats:
     finally:
         db.close()
 
+    # Archive the database to the target destination
+    config.db_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(str(local_db_path), str(config.db_path))
+    print(f"Database archived to {config.db_path}")
+    local_db_path.unlink()
+    print(f"Local database copy removed.")
+
     return stats
 
 
@@ -394,7 +436,16 @@ def apply_tags_from_csv(config: AppConfig, csv_path: Path) -> None:
     folder_tags = load_tag_review_csv(csv_path)
     ingestion_str = str(config.ingestion_path)
 
-    db = Database(config.db_path)
+    # Work with a local copy of the database
+    local_data_dir = Path("data")
+    local_data_dir.mkdir(parents=True, exist_ok=True)
+    local_db_path = local_data_dir / "nowa_photos.db"
+
+    # Copy archive DB to local for editing
+    if config.db_path.exists():
+        shutil.copy2(str(config.db_path), str(local_db_path))
+
+    db = Database(local_db_path)
     try:
         replaced = 0
         for folder, tags in folder_tags.items():
@@ -408,6 +459,12 @@ def apply_tags_from_csv(config: AppConfig, csv_path: Path) -> None:
         print(f"Exported {count} records to {config.metadata_path}")
     finally:
         db.close()
+
+    # Archive the database to the target destination
+    shutil.copy2(str(local_db_path), str(config.db_path))
+    print(f"Database archived to {config.db_path}")
+    local_db_path.unlink()
+    print(f"Local database copy removed.")
 
 
 def main():

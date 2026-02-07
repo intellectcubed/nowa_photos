@@ -21,8 +21,10 @@ def export_metadata_jsonl(db: Database, path: Path | str) -> int:
 
     with open(path, "w", encoding="utf-8") as f:
         for record in records:
+            # Combine archive_path and archive_filename for the full path
+            full_archive_path = f"{record['archive_path']}/{record['archive_filename']}"
             line = {
-                "archive_path": record["archive_path"],
+                "archive_path": full_archive_path,
                 "hash": record["hash_signature"],
                 "tags": record["tags"],
                 "sources": record["sources"],

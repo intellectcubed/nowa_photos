@@ -6,36 +6,52 @@ from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS media (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    archive_path    TEXT    NOT NULL,
-    media_type      TEXT    NOT NULL,
-    hash_signature  TEXT    NOT NULL UNIQUE,
-    file_size       INTEGER NOT NULL,
-    duration        REAL,
-    exif_date       TEXT,
-    file_date       TEXT    NOT NULL,
-    ingestion_timestamp TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS source (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    media_id    INTEGER NOT NULL,
-    source_path TEXT    NOT NULL,
-    FOREIGN KEY (media_id) REFERENCES media(id),
-    UNIQUE(media_id, source_path)
-);
-
-CREATE TABLE IF NOT EXISTS tags (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    media_id    INTEGER NOT NULL,
-    tag_value   TEXT    NOT NULL,
-    FOREIGN KEY (media_id) REFERENCES media(id),
-    UNIQUE(media_id, tag_value)
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    archive_path        TEXT    NOT NULL,
+    archive_filename    TEXT    NOT NULL,
+    media_type          TEXT    NOT NULL,
+    hash_signature      TEXT    NOT NULL UNIQUE,
+    file_size           INTEGER NOT NULL,
+    duration            REAL,
+    exif_date           TEXT,
+    file_date           TEXT    NOT NULL,
+    ingestion_timestamp TEXT    NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_media_hash ON media(hash_signature);
-CREATE INDEX IF NOT EXISTS idx_source_media ON source(media_id);
-CREATE INDEX IF NOT EXISTS idx_tags_media ON tags(media_id);
+
+CREATE TABLE IF NOT EXISTS tag (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    value TEXT    NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS media_tag (
+    media_id INTEGER NOT NULL,
+    tag_id   INTEGER NOT NULL,
+    PRIMARY KEY (media_id, tag_id),
+    FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
+    FOREIGN KEY (tag_id)   REFERENCES tag(id)   ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_tag_media ON media_tag(media_id);
+CREATE INDEX IF NOT EXISTS idx_media_tag_tag   ON media_tag(tag_id);
+
+CREATE TABLE IF NOT EXISTS source_item (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_path TEXT    NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS media_source (
+    media_id        INTEGER NOT NULL,
+    source_item_id  INTEGER NOT NULL,
+    source_filename TEXT    NOT NULL,
+    PRIMARY KEY (media_id, source_item_id, source_filename),
+    FOREIGN KEY (media_id)       REFERENCES media(id)       ON DELETE CASCADE,
+    FOREIGN KEY (source_item_id) REFERENCES source_item(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_media_source_media  ON media_source(media_id);
+CREATE INDEX IF NOT EXISTS idx_media_source_source ON media_source(source_item_id);
 """
 
 
@@ -62,6 +78,7 @@ class Database:
     def insert_media(
         self,
         archive_path: str,
+        archive_filename: str,
         media_type: str,
         hash_signature: str,
         file_size: int,
@@ -74,11 +91,11 @@ class Database:
         with self.transaction():
             cursor = self.conn.execute(
                 """INSERT INTO media
-                   (archive_path, media_type, hash_signature, file_size,
-                    duration, exif_date, file_date, ingestion_timestamp)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (archive_path, media_type, hash_signature, file_size,
-                 duration, exif_date, file_date, ingestion_timestamp),
+                   (archive_path, archive_filename, media_type, hash_signature,
+                    file_size, duration, exif_date, file_date, ingestion_timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (archive_path, archive_filename, media_type, hash_signature,
+                 file_size, duration, exif_date, file_date, ingestion_timestamp),
             )
             return cursor.lastrowid
 
@@ -94,58 +111,107 @@ class Database:
         cols = [desc[0] for desc in cursor.description]
         return dict(zip(cols, row))
 
-    def add_source(self, media_id: int, source_path: str) -> None:
-        """Add a source path for a media record. Ignores duplicates."""
+    def _get_or_create_source_item(self, source_path: str) -> int:
+        """Get existing source_item id or create new one. Returns the id."""
+        cursor = self.conn.execute(
+            "SELECT id FROM source_item WHERE source_path = ?",
+            (source_path,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        cursor = self.conn.execute(
+            "INSERT INTO source_item (source_path) VALUES (?)",
+            (source_path,),
+        )
+        return cursor.lastrowid
+
+    def add_source(self, media_id: int, source_path: str, source_filename: str) -> None:
+        """Add a source for a media record. Ignores duplicates."""
         with self.transaction():
+            source_item_id = self._get_or_create_source_item(source_path)
             self.conn.execute(
-                "INSERT OR IGNORE INTO source (media_id, source_path) VALUES (?, ?)",
-                (media_id, source_path),
+                """INSERT OR IGNORE INTO media_source
+                   (media_id, source_item_id, source_filename)
+                   VALUES (?, ?, ?)""",
+                (media_id, source_item_id, source_filename),
             )
+
+    def _get_or_create_tag(self, tag_value: str) -> int:
+        """Get existing tag id or create new one. Returns the id."""
+        cursor = self.conn.execute(
+            "SELECT id FROM tag WHERE value = ?",
+            (tag_value,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row[0]
+        cursor = self.conn.execute(
+            "INSERT INTO tag (value) VALUES (?)",
+            (tag_value,),
+        )
+        return cursor.lastrowid
 
     def add_tags(self, media_id: int, tags: list[str]) -> None:
         """Add tags for a media record. Ignores duplicates."""
         if not tags:
             return
         with self.transaction():
-            self.conn.executemany(
-                "INSERT OR IGNORE INTO tags (media_id, tag_value) VALUES (?, ?)",
-                [(media_id, tag) for tag in tags],
-            )
+            for tag_value in tags:
+                tag_id = self._get_or_create_tag(tag_value)
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO media_tag (media_id, tag_id) VALUES (?, ?)",
+                    (media_id, tag_id),
+                )
 
     def replace_tags(self, media_id: int, tags: list[str]) -> None:
         """Replace all tags for a media record (delete + insert)."""
         with self.transaction():
             self.conn.execute(
-                "DELETE FROM tags WHERE media_id = ?",
+                "DELETE FROM media_tag WHERE media_id = ?",
                 (media_id,),
             )
-            if tags:
-                self.conn.executemany(
-                    "INSERT INTO tags (media_id, tag_value) VALUES (?, ?)",
-                    [(media_id, tag) for tag in tags],
+            for tag_value in tags:
+                tag_id = self._get_or_create_tag(tag_value)
+                self.conn.execute(
+                    "INSERT INTO media_tag (media_id, tag_id) VALUES (?, ?)",
+                    (media_id, tag_id),
                 )
+
+    def get_tags_for_media(self, media_id: int) -> list[str]:
+        """Get all tag values for a media record."""
+        rows = self.conn.execute(
+            """SELECT t.value FROM tag t
+               JOIN media_tag mt ON t.id = mt.tag_id
+               WHERE mt.media_id = ?
+               ORDER BY t.id""",
+            (media_id,),
+        ).fetchall()
+        return [r[0] for r in rows]
 
     def get_media_ids_by_source_folder(
         self, ingestion_path: str, folder: str,
     ) -> list[int]:
-        """Return distinct media_ids whose source_path is within the given folder.
+        """Return distinct media_ids whose source is within the given folder.
 
-        Matches source paths that start with '{ingestion_path}/{folder}/'.
-        For root-level files (folder is '.'), matches paths directly under ingestion_path.
+        Matches source_item.source_path that equals or starts with the folder path.
+        For root-level files (folder is '.'), matches the ingestion_path exactly.
         """
         if folder == ".":
-            prefix = ingestion_path.rstrip("/") + "/"
-            # Match files directly in ingestion_path (no further '/' after prefix)
+            # Files directly in ingestion_path
             rows = self.conn.execute(
-                """SELECT DISTINCT media_id FROM source
-                   WHERE source_path LIKE ? AND source_path NOT LIKE ?""",
-                (prefix + "%", prefix + "%/%"),
+                """SELECT DISTINCT ms.media_id FROM media_source ms
+                   JOIN source_item si ON ms.source_item_id = si.id
+                   WHERE si.source_path = ?""",
+                (ingestion_path.rstrip("/"),),
             ).fetchall()
         else:
-            prefix = ingestion_path.rstrip("/") + "/" + folder + "/"
+            folder_path = ingestion_path.rstrip("/") + "/" + folder
             rows = self.conn.execute(
-                "SELECT DISTINCT media_id FROM source WHERE source_path LIKE ?",
-                (prefix + "%",),
+                """SELECT DISTINCT ms.media_id FROM media_source ms
+                   JOIN source_item si ON ms.source_item_id = si.id
+                   WHERE si.source_path = ?""",
+                (folder_path,),
             ).fetchall()
         return [r[0] for r in rows]
 
@@ -160,14 +226,23 @@ class Database:
         for record in media_rows:
             mid = record["id"]
 
+            # Get sources (full paths reconstructed)
             sources = self.conn.execute(
-                "SELECT source_path FROM source WHERE media_id = ? ORDER BY id",
+                """SELECT si.source_path, ms.source_filename
+                   FROM media_source ms
+                   JOIN source_item si ON ms.source_item_id = si.id
+                   WHERE ms.media_id = ?
+                   ORDER BY ms.source_item_id""",
                 (mid,),
             ).fetchall()
-            record["sources"] = [s[0] for s in sources]
+            record["sources"] = [f"{s[0]}/{s[1]}" for s in sources]
 
+            # Get tags
             tags = self.conn.execute(
-                "SELECT tag_value FROM tags WHERE media_id = ? ORDER BY id",
+                """SELECT t.value FROM tag t
+                   JOIN media_tag mt ON t.id = mt.tag_id
+                   WHERE mt.media_id = ?
+                   ORDER BY t.id""",
                 (mid,),
             ).fetchall()
             record["tags"] = [t[0] for t in tags]

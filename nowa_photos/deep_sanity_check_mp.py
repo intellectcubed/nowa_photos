@@ -12,6 +12,7 @@ Same as deep_sanity_check2 but hashes files in parallel using ProcessPoolExecuto
 import argparse
 import os
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -41,6 +42,8 @@ def _collect_file_paths(archive_folder: Path) -> list[tuple[str, str]]:
 def _hash_one(args: tuple[str, str]) -> tuple[str, str, str | None]:
     """Hash a single file. Runs in a worker process.
 
+    Retries up to 5 times with exponential backoff on FileNotFoundError.
+
     Args:
         args: (full_path, rel_path)
 
@@ -48,11 +51,21 @@ def _hash_one(args: tuple[str, str]) -> tuple[str, str, str | None]:
         (rel_path, hash_hex, error_message_or_None)
     """
     full_path, rel_path = args
-    try:
-        file_hash = hash_file(full_path)
-        return (rel_path, file_hash, None)
-    except Exception as e:
-        return (rel_path, "", str(e))
+    max_retries = 5
+    for attempt in range(max_retries + 1):
+        try:
+            file_hash = hash_file(full_path)
+            return (rel_path, file_hash, None)
+        except FileNotFoundError:
+            if attempt < max_retries:
+                delay = 2 ** attempt  # 1, 2, 4, 8, 16 seconds
+                print(f"retrying failed file read {rel_path} (attempt {attempt + 2}/{max_retries + 1})")
+                time.sleep(delay)
+            else:
+                return (rel_path, "", f"FileNotFoundError after {max_retries + 1} attempts")
+        except Exception as e:
+            return (rel_path, "", str(e))
+    return (rel_path, "", "unexpected retry exhaustion")
 
 
 def deep_sanity_check_mp(

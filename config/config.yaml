@@ -2,7 +2,12 @@
 # Copy this file and adjust paths before running.
 
 # Paths
-ingestion_path: "/path/to/source/folder"
+# Use ingestion_path for a single source, or ingestion_paths for multiple:
+# ingestion_path: "/path/to/source/folder"
+ingestion_paths:
+  - "/path/to/source/folder1"
+  - "/path/to/source/folder2"
+  - "/path/to/source/folder3"
 archive_path: "/path/to/archive"
 db_path: "data/nowa_photos.db"          # relative to archive_path
 metadata_path: "data/metadata.jsonl"    # relative to archive_path

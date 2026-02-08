@@ -211,7 +211,7 @@ def process_file(
     db: Database,
     session_ts: str,
     stats: SessionStats,
-    is_duplicate: bool = False,
+    ingestion_path: Path | None = None,
 ) -> tuple[int | None, bool]:
     """Process a single file: hash, dedup, archive, record in DB.
 
@@ -298,10 +298,11 @@ def _write_session_log(config: AppConfig, stats: SessionStats, session_ts: str) 
     ts_str = session_ts.replace(":", "").replace("-", "").replace("T", "_")
     log_path = config.log_dir / f"session_{ts_str}.txt"
 
+    sources = ", ".join(str(p) for p in config.ingestion_paths)
     lines = [
         f"Nowa Photos Ingestion Session",
         f"Timestamp: {session_ts}",
-        f"Source: {config.ingestion_path}",
+        f"Sources: {sources}",
         f"Archive: {config.archive_path}",
         f"Mode: {config.mode}",
         f"",
@@ -324,8 +325,74 @@ def _write_session_log(config: AppConfig, stats: SessionStats, session_ts: str) 
 
 # --- Main entry point ---
 
+def _process_ingestion_path(
+    ingestion_path: Path,
+    config: AppConfig,
+    db: Database,
+    session_ts: str,
+    stats: SessionStats,
+    all_folder_tags: dict[str, list[str]],
+    all_file_counts: dict[str, int],
+) -> None:
+    """Process a single ingestion path."""
+    # 1. Discover files
+    print(f"Scanning {ingestion_path} ...")
+    files = discover_files(ingestion_path)
+    print(f"Found {len(files)} media files.")
+
+    if not files:
+        print("Nothing to process in this path.")
+        return
+
+    # 2. Process each file (with error isolation)
+    file_media_ids: dict[Path, int] = {}
+    duplicate_files: set[Path] = set()
+    for file_path in files:
+        try:
+            media_id, was_duplicate = process_file(file_path, config, db, session_ts, stats, ingestion_path)
+            if media_id is not None:
+                file_media_ids[file_path] = media_id
+                if was_duplicate:
+                    duplicate_files.add(file_path)
+        except Exception as exc:
+            stats.errors += 1
+            stats.error_details.append(f"{file_path}: {exc}")
+            print(f"  ERROR processing {file_path}: {exc}")
+
+    # 3. Tag application (auto-apply defaults)
+    files_by_folder: dict[str, list[Path]] = defaultdict(list)
+    for file_path in files:
+        rel_folder = str(Path(file_path).relative_to(ingestion_path).parent)
+        files_by_folder[rel_folder].append(file_path)
+
+    folder_tags = extract_folder_tags(
+        files_by_folder,
+        ingestion_path,
+        stop_words=config.tag_stop_words,
+    )
+
+    for folder, tags in folder_tags.items():
+        if not tags:
+            continue
+        for file_path in files_by_folder[folder]:
+            media_id = file_media_ids.get(file_path)
+            if media_id is not None:
+                existing_tags = db.get_tags_for_media(media_id)
+                new_tags = [t for t in tags if t not in existing_tags]
+                if new_tags:
+                    db.add_tags(media_id, new_tags)
+                    stats.tags_added += len(new_tags)
+
+    # Collect folder tags for CSV (prefix with ingestion path name for uniqueness)
+    path_name = ingestion_path.name
+    for folder, tags in folder_tags.items():
+        key = f"{path_name}/{folder}" if folder != "." else path_name
+        all_folder_tags[key] = tags
+        all_file_counts[key] = len(files_by_folder[folder])
+
+
 def run_ingestion(config: AppConfig) -> SessionStats:
-    """Run the full ingestion pipeline."""
+    """Run the full ingestion pipeline for all configured paths."""
     session_ts = datetime.now().isoformat(timespec="seconds")
     stats = SessionStats()
 
@@ -339,74 +406,35 @@ def run_ingestion(config: AppConfig) -> SessionStats:
         shutil.copy2(str(config.db_path), str(local_db_path))
 
     db = Database(local_db_path)
+    all_folder_tags: dict[str, list[str]] = {}
+    all_file_counts: dict[str, int] = {}
+
     try:
-        # 1. Discover files
-        print(f"Scanning {config.ingestion_path} ...")
-        files = discover_files(config.ingestion_path)
-        print(f"Found {len(files)} media files.")
+        total_paths = len(config.ingestion_paths)
+        for idx, ingestion_path in enumerate(config.ingestion_paths, start=1):
+            print(f"\nProcessing path: '{ingestion_path.name}' {idx} of {total_paths}")
+            print("=" * 60)
+            _process_ingestion_path(
+                ingestion_path, config, db, session_ts, stats,
+                all_folder_tags, all_file_counts,
+            )
 
-        if not files:
-            print("Nothing to process.")
-            return stats
-
-        # 2. Process each file (with error isolation)
-        file_media_ids: dict[Path, int] = {}
-        duplicate_files: set[Path] = set()
-        for file_path in files:
-            try:
-                media_id, was_duplicate = process_file(file_path, config, db, session_ts, stats)
-                if media_id is not None:
-                    file_media_ids[file_path] = media_id
-                    if was_duplicate:
-                        duplicate_files.add(file_path)
-            except Exception as exc:
-                stats.errors += 1
-                stats.error_details.append(f"{file_path}: {exc}")
-                print(f"  ERROR processing {file_path}: {exc}")
-
-        # 3. Tag application (auto-apply defaults, write review CSV)
-        files_by_folder: dict[str, list[Path]] = defaultdict(list)
-        for file_path in files:
-            rel_folder = str(Path(file_path).relative_to(config.ingestion_path).parent)
-            files_by_folder[rel_folder].append(file_path)
-
-        folder_tags = extract_folder_tags(
-            files_by_folder,
-            config.ingestion_path,
-            stop_words=config.tag_stop_words,
-        )
-
-        for folder, tags in folder_tags.items():
-            if not tags:
-                continue
-            for file_path in files_by_folder[folder]:
-                media_id = file_media_ids.get(file_path)
-                if media_id is not None:
-                    # add_tags handles duplicates gracefully (uses INSERT OR IGNORE)
-                    # so this works for both new files and duplicates
-                    existing_tags = db.get_tags_for_media(media_id)
-                    new_tags = [t for t in tags if t not in existing_tags]
-                    if new_tags:
-                        db.add_tags(media_id, new_tags)
-                        stats.tags_added += len(new_tags)
-
-        # Write tag review CSV for user to edit
-        file_counts = {folder: len(paths) for folder, paths in files_by_folder.items()}
+        # Write combined tag review CSV for user to edit
         ts_str = session_ts.replace(":", "").replace("-", "").replace("T", "_")
         csv_path = config.metadata_path.parent / f"tag_review_{ts_str}.csv"
-        write_tag_review_csv(folder_tags, file_counts, csv_path)
-        print(f"Tag review CSV: {csv_path}")
+        write_tag_review_csv(all_folder_tags, all_file_counts, csv_path)
+        print(f"\nTag review CSV: {csv_path}")
         print("  Edit this file and run with --apply-tags to override tag assignments.")
 
-        # 4. Export metadata JSONL
+        # Export metadata JSONL
         count = export_metadata_jsonl(db, config.metadata_path)
         print(f"Exported {count} records to {config.metadata_path}")
 
-        # 5. Write session log
+        # Write session log
         log_path = _write_session_log(config, stats, session_ts)
         print(f"Session log: {log_path}")
 
-        # 6. Print summary
+        # Print summary
         print(f"\nSession Summary:")
         print(f"  Imported: {stats.imported}")
         print(f"  Duplicates skipped: {stats.duplicates}")
@@ -434,7 +462,9 @@ def apply_tags_from_csv(config: AppConfig, csv_path: Path) -> None:
     Then re-exports the JSONL metadata file.
     """
     folder_tags = load_tag_review_csv(csv_path)
-    ingestion_str = str(config.ingestion_path)
+
+    # Build mapping from path name to full ingestion path
+    path_name_to_full: dict[str, Path] = {p.name: p for p in config.ingestion_paths}
 
     # Work with a local copy of the database
     local_data_dir = Path("data")
@@ -449,7 +479,17 @@ def apply_tags_from_csv(config: AppConfig, csv_path: Path) -> None:
     try:
         replaced = 0
         for folder, tags in folder_tags.items():
-            media_ids = db.get_media_ids_by_source_folder(ingestion_str, folder)
+            # Folder key format: "path_name/subfolder" or just "path_name" for root
+            parts = folder.split("/", 1)
+            path_name = parts[0]
+            subfolder = parts[1] if len(parts) > 1 else "."
+
+            ingestion_path = path_name_to_full.get(path_name)
+            if ingestion_path is None:
+                print(f"  Warning: unknown ingestion path '{path_name}', skipping")
+                continue
+
+            media_ids = db.get_media_ids_by_source_folder(str(ingestion_path), subfolder)
             for mid in media_ids:
                 db.replace_tags(mid, tags)
                 replaced += 1
@@ -505,8 +545,9 @@ def main():
             sys.exit(1)
         apply_tags_from_csv(config, csv_path)
     else:
-        if not config.ingestion_path.exists():
-            print(f"Error: ingestion path does not exist: {config.ingestion_path}", file=sys.stderr)
-            sys.exit(1)
+        for path in config.ingestion_paths:
+            if not path.exists():
+                print(f"Error: ingestion path does not exist: {path}", file=sys.stderr)
+                sys.exit(1)
         config.archive_path.mkdir(parents=True, exist_ok=True)
         run_ingestion(config)

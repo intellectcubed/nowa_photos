@@ -16,7 +16,7 @@ DEFAULT_TAG_STOP_WORDS = [
 
 @dataclass
 class AppConfig:
-    ingestion_path: Path
+    ingestion_paths: list[Path]
     archive_path: Path
     db_path: Path
     metadata_path: Path
@@ -49,12 +49,21 @@ def _load_yaml(path: Path) -> dict:
 
 def _validate_and_resolve(data: dict) -> AppConfig:
     # Required fields
-    for key in ("ingestion_path", "archive_path"):
-        if key not in data:
-            raise ValueError(f"Missing required config field: {key}")
+    if "archive_path" not in data:
+        raise ValueError("Missing required config field: archive_path")
+    if "ingestion_path" not in data and "ingestion_paths" not in data:
+        raise ValueError("Missing required config field: ingestion_path or ingestion_paths")
 
-    ingestion_path = Path(data["ingestion_path"]).expanduser().resolve()
     archive_path = Path(data["archive_path"]).expanduser().resolve()
+
+    # Support both single path and list of paths
+    if "ingestion_paths" in data:
+        raw_paths = data["ingestion_paths"]
+        if not isinstance(raw_paths, list):
+            raise ValueError("ingestion_paths must be a list")
+        ingestion_paths = [Path(p).expanduser().resolve() for p in raw_paths]
+    else:
+        ingestion_paths = [Path(data["ingestion_path"]).expanduser().resolve()]
 
     # Resolve paths relative to archive_path
     db_path_raw = data.get("db_path", "data/nowa_photos.db")
@@ -79,7 +88,7 @@ def _validate_and_resolve(data: dict) -> AppConfig:
     tag_stop_words = data.get("tag_stop_words", list(DEFAULT_TAG_STOP_WORDS))
 
     return AppConfig(
-        ingestion_path=ingestion_path,
+        ingestion_paths=ingestion_paths,
         archive_path=archive_path,
         db_path=db_path,
         metadata_path=metadata_path,

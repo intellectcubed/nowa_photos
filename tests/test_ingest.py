@@ -145,7 +145,7 @@ def ingestion_env(tmp_path):
     (source / "test.jpg").write_bytes(b"fake image content")
 
     config = AppConfig(
-        ingestion_path=source,
+        ingestion_paths=[source],
         archive_path=archive,
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
@@ -206,7 +206,7 @@ def test_move_mode(tmp_path):
     src_file.write_bytes(b"move test content")
 
     config = AppConfig(
-        ingestion_path=source,
+        ingestion_paths=[source],
         archive_path=archive,
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
@@ -228,7 +228,7 @@ def test_process_file_error_isolation(ingestion_env):
     config = ingestion_env
 
     # Add a second valid file and an unreadable "file" (directory pretending to be file)
-    (config.ingestion_path / "good.png").write_bytes(b"good image")
+    (config.ingestion_paths[0] / "good.png").write_bytes(b"good image")
 
     stats = run_ingestion(config)
     # Both valid files should be processed
@@ -254,7 +254,7 @@ def test_tags_applied_from_folders(tmp_path):
     (source / "vacation" / "italy" / "photo.jpg").write_bytes(b"italy pic")
 
     config = AppConfig(
-        ingestion_path=source,
+        ingestion_paths=[source],
         archive_path=archive,
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
@@ -292,7 +292,7 @@ def test_apply_tags_from_csv_overrides(tmp_path):
     (source / "vacation" / "italy" / "photo.jpg").write_bytes(b"italy pic")
 
     config = AppConfig(
-        ingestion_path=source,
+        ingestion_paths=[source],
         archive_path=archive,
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
@@ -311,11 +311,11 @@ def test_apply_tags_from_csv_overrides(tmp_path):
     assert "italy" in records[0]["tags"]
     db.close()
 
-    # Write an edited CSV that changes the tags
+    # Write an edited CSV that changes the tags (format: path_name/subfolder)
     csv_path = tmp_path / "edited_tags.csv"
     csv_path.write_text(
         "folder,file_count,tags\n"
-        "vacation/italy,1,\"summer,rome\"\n"
+        "source/vacation/italy,1,\"summer,rome\"\n"
     )
 
     # Apply overrides
@@ -338,7 +338,7 @@ def test_apply_tags_clears_tags(tmp_path):
     (source / "event" / "photo.jpg").write_bytes(b"event pic")
 
     config = AppConfig(
-        ingestion_path=source,
+        ingestion_paths=[source],
         archive_path=archive,
         db_path=archive / "data" / "test.db",
         metadata_path=archive / "data" / "metadata.jsonl",
@@ -350,11 +350,11 @@ def test_apply_tags_clears_tags(tmp_path):
 
     run_ingestion(config)
 
-    # Clear tags via CSV
+    # Clear tags via CSV (format: path_name/subfolder)
     csv_path = tmp_path / "clear_tags.csv"
     csv_path.write_text(
         "folder,file_count,tags\n"
-        "event,1,\"\"\n"
+        "source/event,1,\"\"\n"
     )
 
     apply_tags_from_csv(config, csv_path)

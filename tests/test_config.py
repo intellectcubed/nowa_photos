@@ -23,7 +23,7 @@ def valid_config_file(tmp_path):
 def test_valid_config(valid_config_file, tmp_path):
     """Valid config file loads correctly."""
     cfg = build_config(["--config", str(valid_config_file)])
-    assert cfg.ingestion_path == (tmp_path / "source").resolve()
+    assert cfg.ingestion_paths == [(tmp_path / "source").resolve()]
     assert cfg.archive_path == (tmp_path / "archive").resolve()
     assert cfg.mode == "copy"
 

@@ -108,6 +108,8 @@ def deep_sanity_check_mp(
     files_not_in_db: list[str] = []
     files_checked = 0
     files_matched = 0
+    errors = 0
+    first_error: str | None = None
 
     total = len(file_paths)
 
@@ -128,6 +130,9 @@ def deep_sanity_check_mp(
             )
 
             if error:
+                errors += 1
+                if first_error is None:
+                    first_error = f"{rel_path} - {error}"
                 print()  # newline before log message
                 log(f"<< ERROR hashing: {rel_path} - {error}")
                 continue
@@ -172,8 +177,12 @@ def deep_sanity_check_mp(
     log(f"  Files checked on disk:    {files_checked}")
     log(f"  Files matched in DB:      {files_matched}")
     log(f"  Files NOT in DB:          {len(files_not_in_db)}")
+    log(f"  Errors hashing:           {errors}")
     log(f"  DB records not on disk:   {len(db_records_not_on_disk)}")
     log(f"  Total DB records:         {len(db_hashes)}")
+
+    if first_error:
+        log(f"\n  FIRST ERROR: {first_error}")
 
     if not files_not_in_db and not db_records_not_on_disk:
         log("\n  STATUS: OK - All files match!")

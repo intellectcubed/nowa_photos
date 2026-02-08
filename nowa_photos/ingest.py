@@ -12,6 +12,7 @@ from pathlib import Path
 
 from nowa_photos.config import AppConfig
 from nowa_photos.database import Database
+from nowa_photos.db_manager import DBManager
 from nowa_photos.hasher import hash_file
 from nowa_photos.metadata import export_metadata_jsonl
 from nowa_photos.tagger import extract_folder_tags, load_tag_review_csv, write_tag_review_csv
@@ -396,60 +397,46 @@ def run_ingestion(config: AppConfig) -> SessionStats:
     session_ts = datetime.now().isoformat(timespec="seconds")
     stats = SessionStats()
 
-    # Work with a local copy of the database during ingestion
-    local_data_dir = Path("data")
-    local_data_dir.mkdir(parents=True, exist_ok=True)
-    local_db_path = local_data_dir / "nowa_photos.db"
-
-    # If archive DB exists and local doesn't, copy it for continuity
-    if config.db_path.exists() and not local_db_path.exists():
-        shutil.copy2(str(config.db_path), str(local_db_path))
-
-    db = Database(local_db_path)
+    db_manager = DBManager(config.db_path)
     all_folder_tags: dict[str, list[str]] = {}
     all_file_counts: dict[str, int] = {}
 
-    try:
-        total_paths = len(config.ingestion_paths)
-        for idx, ingestion_path in enumerate(config.ingestion_paths, start=1):
-            print(f"\nProcessing path: '{ingestion_path.name}' {idx} of {total_paths}")
-            print("=" * 60)
-            _process_ingestion_path(
-                ingestion_path, config, db, session_ts, stats,
-                all_folder_tags, all_file_counts,
-            )
+    with db_manager as local_db_path:
+        db = Database(local_db_path)
+        try:
+            total_paths = len(config.ingestion_paths)
+            for idx, ingestion_path in enumerate(config.ingestion_paths, start=1):
+                print(f"\nProcessing path: '{ingestion_path.name}' {idx} of {total_paths}")
+                print("=" * 60)
+                _process_ingestion_path(
+                    ingestion_path, config, db, session_ts, stats,
+                    all_folder_tags, all_file_counts,
+                )
 
-        # Write combined tag review CSV for user to edit
-        ts_str = session_ts.replace(":", "").replace("-", "").replace("T", "_")
-        csv_path = config.metadata_path.parent / f"tag_review_{ts_str}.csv"
-        write_tag_review_csv(all_folder_tags, all_file_counts, csv_path)
-        print(f"\nTag review CSV: {csv_path}")
-        print("  Edit this file and run with --apply-tags to override tag assignments.")
+            # Write combined tag review CSV for user to edit
+            ts_str = session_ts.replace(":", "").replace("-", "").replace("T", "_")
+            csv_path = config.metadata_path.parent / f"tag_review_{ts_str}.csv"
+            write_tag_review_csv(all_folder_tags, all_file_counts, csv_path)
+            print(f"\nTag review CSV: {csv_path}")
+            print("  Edit this file and run with --apply-tags to override tag assignments.")
 
-        # Export metadata JSONL
-        count = export_metadata_jsonl(db, config.metadata_path)
-        print(f"Exported {count} records to {config.metadata_path}")
+            # Export metadata JSONL
+            count = export_metadata_jsonl(db, config.metadata_path)
+            print(f"Exported {count} records to {config.metadata_path}")
 
-        # Write session log
-        log_path = _write_session_log(config, stats, session_ts)
-        print(f"Session log: {log_path}")
+            # Write session log
+            log_path = _write_session_log(config, stats, session_ts)
+            print(f"Session log: {log_path}")
 
-        # Print summary
-        print(f"\nSession Summary:")
-        print(f"  Imported: {stats.imported}")
-        print(f"  Duplicates skipped: {stats.duplicates}")
-        print(f"  Tags added: {stats.tags_added}")
-        print(f"  Errors: {stats.errors}")
+            # Print summary
+            print(f"\nSession Summary:")
+            print(f"  Imported: {stats.imported}")
+            print(f"  Duplicates skipped: {stats.duplicates}")
+            print(f"  Tags added: {stats.tags_added}")
+            print(f"  Errors: {stats.errors}")
 
-    finally:
-        db.close()
-
-    # Archive the database to the target destination
-    config.db_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(str(local_db_path), str(config.db_path))
-    print(f"Database archived to {config.db_path}")
-    local_db_path.unlink()
-    print(f"Local database copy removed.")
+        finally:
+            db.close()
 
     return stats
 
@@ -466,45 +453,33 @@ def apply_tags_from_csv(config: AppConfig, csv_path: Path) -> None:
     # Build mapping from path name to full ingestion path
     path_name_to_full: dict[str, Path] = {p.name: p for p in config.ingestion_paths}
 
-    # Work with a local copy of the database
-    local_data_dir = Path("data")
-    local_data_dir.mkdir(parents=True, exist_ok=True)
-    local_db_path = local_data_dir / "nowa_photos.db"
+    db_manager = DBManager(config.db_path)
 
-    # Copy archive DB to local for editing
-    if config.db_path.exists():
-        shutil.copy2(str(config.db_path), str(local_db_path))
+    with db_manager as local_db_path:
+        db = Database(local_db_path)
+        try:
+            replaced = 0
+            for folder, tags in folder_tags.items():
+                # Folder key format: "path_name/subfolder" or just "path_name" for root
+                parts = folder.split("/", 1)
+                path_name = parts[0]
+                subfolder = parts[1] if len(parts) > 1 else "."
 
-    db = Database(local_db_path)
-    try:
-        replaced = 0
-        for folder, tags in folder_tags.items():
-            # Folder key format: "path_name/subfolder" or just "path_name" for root
-            parts = folder.split("/", 1)
-            path_name = parts[0]
-            subfolder = parts[1] if len(parts) > 1 else "."
+                ingestion_path = path_name_to_full.get(path_name)
+                if ingestion_path is None:
+                    print(f"  Warning: unknown ingestion path '{path_name}', skipping")
+                    continue
 
-            ingestion_path = path_name_to_full.get(path_name)
-            if ingestion_path is None:
-                print(f"  Warning: unknown ingestion path '{path_name}', skipping")
-                continue
+                media_ids = db.get_media_ids_by_source_folder(str(ingestion_path), subfolder)
+                for mid in media_ids:
+                    db.replace_tags(mid, tags)
+                    replaced += 1
 
-            media_ids = db.get_media_ids_by_source_folder(str(ingestion_path), subfolder)
-            for mid in media_ids:
-                db.replace_tags(mid, tags)
-                replaced += 1
-
-        count = export_metadata_jsonl(db, config.metadata_path)
-        print(f"Updated tags for {replaced} media records from {len(folder_tags)} folders.")
-        print(f"Exported {count} records to {config.metadata_path}")
-    finally:
-        db.close()
-
-    # Archive the database to the target destination
-    shutil.copy2(str(local_db_path), str(config.db_path))
-    print(f"Database archived to {config.db_path}")
-    local_db_path.unlink()
-    print(f"Local database copy removed.")
+            count = export_metadata_jsonl(db, config.metadata_path)
+            print(f"Updated tags for {replaced} media records from {len(folder_tags)} folders.")
+            print(f"Exported {count} records to {config.metadata_path}")
+        finally:
+            db.close()
 
 
 def main():
